@@ -1,78 +1,132 @@
+from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.chat_models import ChatOpenAI
-from sqlalchemy import create_engine, text  # Importamos `text` de SQLAlchemy
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-import os
+import pandas as pd
 import re
+import streamlit as st
 
-# Configurar la clave de API de OpenAI
-openai_api_key = os.getenv("OPENAI_API_KEY")
-
-# Leer los datos de conexión desde variables de entorno
-usuario = os.getenv("DB_USER")
-contraseña = os.getenv("DB_PASSWORD")
-host = os.getenv("DB_HOST")
-nombre_db = os.getenv("DB_NAME")
+# Configuración de la base de datos y OpenAI
+DB_USER = st.secrets["DB_USER"]
+DB_PASSWORD = st.secrets["DB_PASSWORD"]
+DB_HOST = st.secrets["DB_HOST"]
+DB_NAME = st.secrets["DB_NAME"]
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
 # Crear el motor de conexión SQLAlchemy
-engine = create_engine(f"mysql+pymysql://{usuario}:{contraseña}@{host}/{nombre_db}")
+engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}")
 
-# Crear el modelo de lenguaje usando `gpt-4o-mini`
-llm = ChatOpenAI(temperature=0, model_name='gpt-4o-mini')
+# Configurar LLM y prompts
+llm = ChatOpenAI(temperature=0, model_name="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
 
-# Crear el prompt para generar consultas SQL con mayor capacidad de inferencia
-prompt_template = """
-Eres un asistente de consultas SQL en MySQL. Sigue estos pasos:
-1. Lee cuidadosamente la pregunta del usuario e identifica qué información específica necesita.
-2. 2. Primero, verifica si el dato solicitado existe como una columna en la tabla `usuarios`. Si es así, genera una consulta SQL simple para obtenerlo.
-3. Si el usuario menciona un dato de manera general (como "correo electrónico", "edad", "nombre completo"), infiere cuál columna corresponde en la tabla `usuarios`. Por ejemplo, asocia "correo electrónico" con la columna `email`.
-4. Si el dato solicitado no está directamente disponible como columna, intenta derivarlo a partir de otros datos. Usa cálculos o combinaciones cuando sea necesario.
-5. Si la pregunta implica una verificación, comparación o un filtro, utiliza condiciones en SQL para obtener solo los resultados relevantes.
-6. Si la consulta pide una lista de resultados (por ejemplo, "todos los nombres"), devuelve todos los registros relevantes, no solo el primero.
-7. Asegúrate de que la consulta SQL sea precisa y devuelva únicamente los datos necesarios para responder la pregunta.
-8. No incluyas explicaciones adicionales ni información fuera de la consulta SQL.
+# Primer Prompt: Generar la consulta SQL
+sql_prompt_template = """
+Eres un asistente de análisis de datos y consultas SQL para una tabla llamada `Respuestas`. Esta tabla contiene información sobre trabajadores que respondieron un formulario. Las columnas disponibles son:
+
+- `id`: Identificador único.
+- `empresa`: Nombre de la empresa.
+- `nombre`: Nombre del trabajador.
+- `genero`: Género del trabajador (por ejemplo, "Masculino", "Femenino", u "Otro").
+- `edad`: Edad del trabajador.
+- `estudios`: Nivel educativo del trabajador.
+- `correo`: Correo electrónico.
+- `antigüedad`: Antigüedad laboral en años.
+- `sueldo`: Sueldo mensual.
+- `horas`: Horas trabajadas por semana.
+- `posicion`: Puesto laboral.
+
+**Instrucciones**:
+1. Lee cuidadosamente la pregunta del usuario.
+2. Genera una consulta SQL válida que seleccione las columnas completas necesarias para responder la pregunta.
+3. Si la pregunta menciona comparación, estadísticas o relaciones entre datos, selecciona las columnas relevantes completas (sin realizar cálculos en SQL).
+4. Devuelve solo la consulta SQL sin ninguna explicación adicional.
+5. No quiero que des ningún cálculo en la respuesta, sino directamente la columna necesaria. Pero si en la pregunta pide una columna con una indicación concreta, sí que puedes filtrarlo.
+    Por ejemplo, si te pido la media de sueldo en una empresa concreta, no hace falta que des como respuesta todas las empresas y todos los sueldos, sino solo los sueldos de los trabajadores de esa empresa,
+
+Ejemplos:
+- Pregunta: ¿Cuál es la diferencia de sueldo entre hombres y mujeres?
+  Consulta: SELECT genero, sueldo FROM Respuestas;
+- Pregunta: ¿Qué empresas tienen trabajadores con más de 10 años de antigüedad?
+  Consulta: SELECT empresa, antigüedad FROM Respuestas;
+- Pregunta: ¿Cuál es el promedio de edad de los trabajadores?
+  Consulta: SELECT edad FROM Respuestas;
 
 Pregunta del usuario: {question}
 """
-prompt = PromptTemplate(template=prompt_template, input_variables=["question"])
-chain = LLMChain(llm=llm, prompt=prompt)
+sql_prompt = PromptTemplate(template=sql_prompt_template, input_variables=["question"])
 
-# Función para hacer la consulta y obtener el resultado real
-def consulta(input_usuario):
-    # Generar la consulta SQL basada en la pregunta
-    consulta_sql = chain.run({"question": input_usuario})
-    print("Consulta generada (antes de limpieza):", consulta_sql)  # Verificar la consulta generada para depuración
-    
-    # Limpiar la consulta SQL para eliminar texto adicional
-    consulta_sql = re.search(r"(SELECT .* FROM .*;)", consulta_sql, re.IGNORECASE)
-    if consulta_sql:
-        consulta_sql = consulta_sql.group(0)  # Extraer solo la consulta SQL
-    else:
-        return "Error: No se pudo generar una consulta SQL válida."
+# Segundo Prompt: Crear una respuesta directa y analítica
+response_prompt_template = """
+Eres un asistente de datos. Responde de forma directa y concisa a la pregunta del usuario utilizando los datos proporcionados.
 
-    print("Consulta generada (después de limpieza):", consulta_sql)  # Verificar la consulta limpia
-    
-    # Ejecutar la consulta en la base de datos y obtener el resultado
+Pregunta del usuario: {question}
+Datos obtenidos (en formato tabla):
+{data}
+
+Tu respuesta debe:
+1. Ser breve y directa.
+2. Incluir solo la información necesaria para responder la pregunta.
+3. Evitar explicaciones adicionales o análisis que no se hayan solicitado.
+
+Ejemplo:
+- Pregunta: ¿Cuántas empresas hay?
+  Respuesta: Hay un total de 4 empresas diferentes (TechCorp, Innovatech, FutureTech y MegaCorp).
+
+  Si la tabla es excesivamente larga, no la incluyas en la respuesta porque puede afectar a la facilidad de comprensión.
+
+Debes ser capaz de justificar la respuesta, pero sin dar datos innecesarios. Por ejemplo si te pregunto una diferencia salarial entre géneros, no hace falta que me digas cuánto ha cobrado cada persona de la tabla, pero si me puedes dar una media de cada género o un porcentaje de diferencia.
+"""
+response_prompt = PromptTemplate(template=response_prompt_template, input_variables=["question", "data"])
+
+# Función para generar la consulta SQL
+def generar_consulta_sql(pregunta):
+    return llm.predict(sql_prompt.format(question=pregunta))
+
+# Función para procesar la consulta SQL
+def ejecutar_consulta(consulta_sql):
     try:
-        # Envolver la consulta en text() para hacerla ejecutable
-        consulta_sql_text = text(consulta_sql)
-        
-        # Conectar a la base de datos y ejecutar la consulta
         with engine.connect() as connection:
-            resultado = connection.execute(consulta_sql_text).fetchall()
-        
-        # Formatear el resultado para devolverlo como respuesta en español
-        if resultado:
-            # Si hay múltiples resultados, concatenamos todos
-            if len(resultado) > 1:
-                respuesta = "Resultados: " + ", ".join([str(row[0]) for row in resultado])
-            else:
-                respuesta = f"Resultado: {resultado[0][0]}"
-        else:
-            respuesta = "No se encontraron resultados para la consulta."
-    
+            consulta_text = text(consulta_sql)
+            resultado = connection.execute(consulta_text)
+            
+            # Obtener nombres de las columnas
+            columnas = resultado.keys()
+            
+            # Crear DataFrame con los resultados
+            datos = [list(row) for row in resultado]
+            df = pd.DataFrame(datos, columns=columnas)
+            
+            return df
     except SQLAlchemyError as e:
-        respuesta = f"Error al ejecutar la consulta: {str(e)}"
-    
-    return respuesta
+        return f"Error al ejecutar la consulta: {str(e)}"
+
+# Función para generar la respuesta final
+def generar_respuesta_elaborada(pregunta, datos):
+    datos_str = datos.to_string(index=False) if isinstance(datos, pd.DataFrame) else datos
+    return llm.predict(response_prompt.format(question=pregunta, data=datos_str))
+
+# Función principal para manejar el flujo completo
+def procesar_pregunta(pregunta_usuario):
+    try:
+        # Generar la consulta SQL
+        consulta_sql = generar_consulta_sql(pregunta_usuario)
+        print("Consulta SQL generada:", consulta_sql)
+        
+        # Validar la consulta generada
+        consulta_sql = re.search(r"(SELECT .* FROM .*;)", consulta_sql, re.IGNORECASE)
+        if not consulta_sql:
+            return "Error: No se pudo generar una consulta válida. Verifica tu pregunta."
+        consulta_sql = consulta_sql.group(0)
+        
+        # Ejecutar la consulta y obtener los datos
+        datos_obtenidos = ejecutar_consulta(consulta_sql)
+        if isinstance(datos_obtenidos, str):  # Si ocurrió un error
+            return datos_obtenidos
+
+        print("Datos obtenidos:", datos_obtenidos)
+
+        # Generar una respuesta elaborada
+        respuesta = generar_respuesta_elaborada(pregunta_usuario, datos_obtenidos)
+        return respuesta
+    except Exception as e:
+        return f"Error procesando la pregunta: {str(e)}"
