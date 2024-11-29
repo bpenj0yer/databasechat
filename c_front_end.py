@@ -1,11 +1,9 @@
-# Lanzar con streamlit run c_front_end.py en el terminal
-
 import b_backend
 import streamlit as st
 from streamlit_chat import message
 
-st.title("ChatGPT database")
-st.write("Puedes hacerme a mí todas las preguntas y dejar trabajar al equipo de Data Science!!")
+st.title("ChatGPT Database")
+st.write("Haz preguntas sobre la base de datos y obtén respuestas analizadas.")
 
 if 'preguntas' not in st.session_state:
     st.session_state.preguntas = []
@@ -15,18 +13,21 @@ if 'respuestas' not in st.session_state:
 def click():
     if st.session_state.user != '':
         pregunta = st.session_state.user
-        respuesta = b_backend.consulta(pregunta)
-
-        st.session_state.preguntas.append(pregunta)
-        st.session_state.respuestas.append(respuesta)
-
-        # Limpiar el input de usuario después de enviar la pregunta
+        try:
+            # Llamar al flujo completo en el backend
+            respuesta = b_backend.procesar_pregunta(pregunta)
+            st.session_state.preguntas.append(pregunta)
+            st.session_state.respuestas.append(respuesta)
+        except Exception as e:
+            # Capturar errores inesperados
+            st.session_state.respuestas.append(f"Error: {str(e)}")
         st.session_state.user = ''
 
-with st.form('my-form'):
-   query = st.text_input('¿En qué te puedo ayudar?', key='user', help='Pulsa Enviar para hacer la pregunta')
-   submit_button = st.form_submit_button('Enviar', on_click=click)
+with st.form('formulario'):
+    query = st.text_input('¿En qué puedo ayudarte?', key='user')
+    submit_button = st.form_submit_button('Enviar', on_click=click)
 
 if st.session_state.preguntas:
-    for i in range(len(st.session_state.respuestas)-1, -1, -1):
-        message(st.session_state.respuestas[i], key=str(i))
+    for i in range(len(st.session_state.preguntas) - 1, -1, -1):
+        message(st.session_state.preguntas[i], is_user=True, key=f"q{i}")
+        message(st.session_state.respuestas[i], is_user=False, key=f"r{i}")
