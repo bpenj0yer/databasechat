@@ -5,5 +5,4 @@ langchain_community
 pymysql
 sqlalchemy
 openai
-re
 pandas
