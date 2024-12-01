@@ -2,7 +2,7 @@ import b_backend
 import streamlit as st
 from streamlit_chat import message
 
-st.title("Pene")
+st.title("Masterful ChatDB")
 st.write("Haz preguntas sobre la base de datos y obtén respuestas analizadas.")
 
 if 'preguntas' not in st.session_state:
